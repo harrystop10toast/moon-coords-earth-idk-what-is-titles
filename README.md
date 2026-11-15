@@ -24,4 +24,26 @@ The first argument selects the body (`0` Earth, `1` Moon); the next two are lati
 6. **Water / volatile potential** — compare cautiously; rainfall is not equivalent to lunar hydrogen or confirmed ice.
 7. **Impact setting** — crater density and nearby impact features at comparable map resolution.
 
-Gravity and magnetics are useful context, not direct analog scores. Earth atmosphere, weather, vegetation, and population/infrastructure are excluded from cross-body matching. The CLI reports site measurements; it does not yet select the closest Earth coordinate.
+Gravity and magnetics are useful context, not direct analog scores. Earth atmosphere, weather, vegetation, and population/infrastructure are excluded from cross-body matching.
+
+## Earth analog finder
+
+The standalone local matcher and its setup instructions are in [`resources/earth-index-poc`](resources/earth-index-poc). It ranks up to five Earth analogs for a Moon coordinate; filtering can yield fewer or no matches. To run it from a fresh checkout:
+
+```sh
+cd resources/earth-moon-site-reports
+./gradlew run --args="1 12.5 281.0"
+cd ../earth-index-poc
+python3 build_index.py
+python3 fast_earth_report.py 12.5 281.0 --download-glim
+python3 match_earth_analogs.py 12.5 281.0 --from-report ../earth-moon-site-reports/site-reports.json
+```
+
+Replace `12.5 281.0` with the Moon latitude and longitude. Do not type `#lat #lon` literally in a shell because `#` starts a comment. Generated/downloaded rasters and indexes under `data/` are intentionally not committed; the Earth-index README documents how to fetch them locally.
+
+The matcher can also be run directly from its folder when the matching Moon report is saved where it expects it:
+
+```sh
+cd resources/earth-index-poc
+python3 match_earth_analogs.py 12.5 281.0
+```
