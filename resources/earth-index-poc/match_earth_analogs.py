@@ -1028,10 +1028,6 @@ def score_candidate(
     if reason:
         candidate.disqualified = True
         candidate.disqualify_reason = reason
-        candidate.distance = 9.0
-        candidate.agreement_score = 0.0
-        candidate.aspect_agreement = {"terrain": 0.0}
-        return
 
     if abs(moon.latitude_deg) >= 60:
         # Polar lunar sites need exposed rock, not subtropical desert scoring.
@@ -1077,18 +1073,14 @@ def score_candidate(
     distance = sum(contributions.values())
     agreement = {key: max(0.0, 1.0 - aspects[key]) for key in active}
 
-    # Soft floor: terrain agreement must clear the minimum or the candidate is dead.
+    # Keep below-threshold candidates scored so they can serve as last-resort analogs.
     if agreement["terrain"] < MIN_TERRAIN_AGREEMENT:
         candidate.disqualified = True
-        candidate.disqualify_reason = (
-            f"terrain agreement {agreement['terrain']:.0%} below "
-            f"{MIN_TERRAIN_AGREEMENT:.0%} minimum"
-        )
-        candidate.distance = 9.0
-        candidate.agreement_score = 0.0
-        candidate.aspect_scores = aspects
-        candidate.aspect_agreement = agreement
-        return
+        if candidate.disqualify_reason is None:
+            candidate.disqualify_reason = (
+                f"terrain agreement {agreement['terrain']:.0%} below "
+                f"{MIN_TERRAIN_AGREEMENT:.0%} minimum"
+            )
 
     # Rank by terrain-weighted agreement so arid/material cannot crown a terrain miss.
     # Latitude only enters as a penalty term (already a distance).
@@ -1223,7 +1215,6 @@ def explain_candidate(moon: MoonFeatures, candidate: EarthCandidate) -> None:
             + "."
         )
 
-    candidate.reasons = reasons
     candidate.caveats = [
         "Earth terrain cells are ~10-arc-minute ETOPO5 summaries; lunar terrain is local LDEM — baselines differ.",
         "Mare queries require GLiM basic volcanic (vb); intermediate volcanic is rejected.",
@@ -1232,8 +1223,14 @@ def explain_candidate(moon: MoonFeatures, candidate: EarthCandidate) -> None:
         "Magnetic nT values are never equated across bodies and are not scored.",
         "Absolute elevation, SoilGrids chemistry, weather, and infrastructure are excluded.",
     ]
+    if candidate.disqualify_reason:
+        reasons.append(f"Lower-confidence fallback: {candidate.disqualify_reason}.")
+        candidate.caveats.append(
+            f"Did not meet preferred analog filters: {candidate.disqualify_reason}."
+        )
     if moon.composition_conflict:
         candidate.caveats.insert(0, moon.composition_conflict)
+    candidate.reasons = reasons
 
 
 def diversify(
@@ -1373,41 +1370,49 @@ def match_earth_analogs(
         and item.aspect_agreement.get("terrain", 0.0) >= MIN_TERRAIN_AGREEMENT
     ]
 
-    ordered_arid = sorted(item.arid_suitability for item in good)
-    for item in good:
+    # Prefer strong matches, then eligible weak matches, then the best remaining
+    # scored Earth cell so a valid index always yields a useful coordinate.
+    fallback_used = not good
+    fallback_candidates = [
+        item
+        for item in scored
+        if item.glim_code not in {"ig", "wb"}
+        and abs(item.latitude_deg) < POLAR_ICE_LATITUDE
+    ]
+    ranked_candidates = good or eligible or fallback_candidates or scored
+    ordered_arid = sorted(item.arid_suitability for item in ranked_candidates)
+    for item in ranked_candidates:
         if not ordered_arid:
             item.arid_percentile = None
         else:
             rank = sum(1 for value in ordered_arid if value <= item.arid_suitability)
             item.arid_percentile = rank / len(ordered_arid)
 
-    good.sort(key=lambda item: (-item.agreement_score, item.distance))
-    selected = diversify(good, top_k=top_k, min_separation_deg=min_separation_deg)
+    ranked_candidates.sort(key=lambda item: (-item.agreement_score, item.distance))
+    selected = diversify(
+        ranked_candidates, top_k=top_k, min_separation_deg=min_separation_deg
+    )
     for candidate in selected:
         explain_candidate(moon, candidate)
+        if fallback_used and not candidate.disqualify_reason:
+            candidate.reasons.append(
+                "Lower-confidence fallback: did not meet the preferred overall agreement threshold."
+            )
+            candidate.caveats.append(
+                "Did not meet the preferred overall agreement threshold."
+            )
 
     status = "ok" if selected else "no_good_analog_found"
     status_message = None
-    if not selected:
-        # Summarize why the pool died — prefer terrain gate failures.
-        terrain_fails = sum(
-            1
-            for item in scored
-            if item.disqualify_reason
-            and any(
-                token in item.disqualify_reason
-                for token in ("slope", "roughness", "terrain agreement")
-            )
-        )
+    if fallback_used and selected:
         status_message = (
-            "No good Earth analog found. "
-            f"Checked {len(scored):,} candidates; {len(eligible):,} passed lithology/aridity filters; "
-            f"{terrain_fails:,} failed the terrain gate "
-            f"(slope within ±{TERRAIN_SLOPE_MAX_DELTA_DEG:.0f}° and roughness/relief texture "
-            f"within {TERRAIN_ROUGHNESS_RATIO_MAX:.0f}×, plus terrain agreement ≥ "
-            f"{MIN_TERRAIN_AGREEMENT:.0%}). "
-            f"An honest empty result is returned instead of a weak #1 "
-            f"(minimum overall agreement {MIN_OVERALL_AGREEMENT:.0%})."
+            "No candidate met the preferred agreement and terrain thresholds. "
+            "Showing the best available lower-confidence Earth analog; review its "
+            "score and caveats."
+        )
+    elif not selected:
+        status_message = (
+            "No Earth land candidates with usable terrain data were found in the index."
         )
 
     return {
@@ -1498,8 +1503,8 @@ def match_earth_analogs(
             ],
             "diversification_min_separation_deg": min_separation_deg,
             "notes": [
-                "Terrain is a hard gate: slope ±3°, roughness within 3×, min terrain agreement.",
-                "If no candidate clears the gate/thresholds, status=no_good_analog_found.",
+                "Preferred matches use terrain slope ±3°, roughness within 3×, and minimum agreement thresholds.",
+                "If no preferred match clears the thresholds, the best available lower-confidence Earth candidate is returned.",
                 "Highland maps to anorthosite/plagioclase-rich plutonic-metamorphic proxies (pa/mt/pb).",
                 "Unknown lunar class: material unverified and excluded from the score.",
                 "Latitude is a sun-angle mismatch penalty, not a positive match credit.",

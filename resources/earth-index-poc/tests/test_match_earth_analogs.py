@@ -246,7 +246,7 @@ class MatchEarthAnalogsTests(unittest.TestCase):
         self.assertEqual(0, selected[0].cell_id)
         self.assertEqual(2, selected[1].cell_id)
 
-    def test_no_good_analog_when_terrain_cannot_match(self):
+    def test_returns_low_confidence_fallback_when_terrain_cannot_match(self):
         with tempfile.TemporaryDirectory() as tmp:
             index = Path(tmp) / "index.sqlite3"
             # Earth cells are all flat/smooth — cannot satisfy lunar slope 12° ±3.
@@ -254,6 +254,8 @@ class MatchEarthAnalogsTests(unittest.TestCase):
                 (i, 20.0 + (i % 50) * 0.5, (i * 10) % 360, 1.0, 500.0, 2.0, 20.0, 5.0)
                 for i in range(120)
             ]
+            # Even a terrain-perfect Antarctic cell should not outrank usable land.
+            rows.append((121, -83.0, 159.0, 1.0, 500.0, 12.0, 160.0, 42.0))
             _write_index(index, rows)
             moon = MoonFeatures(
                 latitude_deg=70.0,
@@ -273,9 +275,17 @@ class MatchEarthAnalogsTests(unittest.TestCase):
                 top_k=5,
                 enrich_glim=False,
             )
-            self.assertEqual("no_good_analog_found", result["status"])
-            self.assertEqual([], result["matches"])
-            self.assertIn("No good Earth analog found", result["status_message"])
+            self.assertEqual("ok", result["status"])
+            self.assertGreater(len(result["matches"]), 0)
+            self.assertIn("lower-confidence", result["status_message"])
+            self.assertLess(abs(result["matches"][0]["coordinate"]["latitude_deg"]), 70.0)
+            self.assertLess(result["matches"][0]["similarity_score"], 0.5)
+            self.assertTrue(
+                any(
+                    "Lower-confidence fallback" in reason
+                    for reason in result["matches"][0]["why"]
+                )
+            )
 
     def test_terrain_matched_unknown_excludes_material_from_score(self):
         with tempfile.TemporaryDirectory() as tmp:
